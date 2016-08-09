@@ -4,6 +4,7 @@ import sys
 import logging
 import re
 import subprocess
+import datetime
 
 import zope.component
 import zope.interface
@@ -30,6 +31,10 @@ class Installer(common.Plugin):
     def add_parser_arguments(cls, add):
         add("cf-distribution-id", default=os.getenv('CF_DISTRIBUTION_ID'),
             help="CloudFront distribution id")
+        add("cf-update-expired-only", action='store_true',
+            help="Only install the certificate if the existing one has expired")
+        add("cf-update-deployed-only", action='store_true',
+            help="Only update the CloudFront distribution if its status is 'Deployed'")
 
     def __init__(self, *args, **kwargs):
         super(Installer, self).__init__(*args, **kwargs)
@@ -55,6 +60,23 @@ class Installer(common.Plugin):
         cf_client = boto3.client('cloudfront')
 
         name = "le-%s" % domain
+
+        if self.conf('cf-update-deployed-only') == True:
+            cf = cf_client.get_distribution(Id=self.conf('cf-distribution-id'))
+            if not cf['Distribution']['Status'] == 'Deployed':
+                logger.info("Cloudfront distribution status is not 'Deployed'. Skipping installation")
+                return
+
+        if self.conf('cf-update-expired-only') == True:
+            response = client.list_server_certificates()
+            for cert in response['ServerCertificateMetadataList']:
+                if cert['ServerCertificateName'] == name:
+                    expiration_delta = \
+                            cert['Expiration'].replace(tzinfo=None) - datetime.datetime.utcnow()
+                    if (int(expiration_delta.total_seconds())) > 0:
+                        logger.info("Existing certificate has not expired. Skipping")
+                        return
+
         body = open(cert_path).read()
         key = open(key_path).read()
         chain = open(chain_path).read()
@@ -67,6 +89,7 @@ class Installer(common.Plugin):
             CertificateChain=chain
         )
         cert_id = response['ServerCertificateMetadata']['ServerCertificateId']
+
         # Update CloudFront config to use the new one
         cf_cfg = cf_client.get_distribution_config(Id=self.conf('cf-distribution-id'))
         cf_cfg['DistributionConfig']['ViewerCertificate']['IAMCertificateId'] = cert_id
